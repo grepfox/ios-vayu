@@ -1,0 +1,191 @@
+From d8deb9df6c808306899223da65db1b6ff1d855a0 Mon Sep 17 00:00:00 2001
+From: grep <ghanishftw@gmail.com>
+Date: Thu, 5 Nov 2026 16:18:35 +0100
+Subject: [PATCH] vayu: WLAN MSA 1.5 MB (fixed region), wlfwicnss=1 MIUI flow,
+ wlfwmax restart cap, sweetfb_guard, sweetblnits/min-nits
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 24 +++++++++++++-
+ iokit/Kernel/arm/TopazModem.cpp       | 48 ++++++++++++++++++++++-----
+ 2 files changed, 62 insertions(+), 10 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 91d0197..4dcf740 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -171,6 +171,13 @@ enum {
+ /* vsync period; boot-arg sweetfb_vsync (Hz, 30..120, default 60) */
+ static uint32_t sweet_fb_vsync_us = 16667;
+ static uint32_t sweet_fb_vhz = 60;     /* the rate published to CoreAnimation (sweetfb_vsync=) */
++/*
++ * vsyncNext's guard, percent of the vsync period (sweetfb_guard=): a tick closer than that is
++ * pushed one panel frame on. 75 at 60 Hz (every other panel frame). At 120 the old 75 % (6.25 ms)
++ * skipped a whole frame whenever timer latency + the ~2 ms present passed ~2 ms (vayu 1012-120),
++ * so 120 defaults to 25.
++ */
++static uint32_t sweet_fb_guard = 75;
+ #define SWEET_FB_VSYNC_US               sweet_fb_vsync_us
+ #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
+ /*
+@@ -488,6 +495,15 @@ AppleCLCD::start(IOService *provider)
+ 			fBlLevel = cur / 2u;            /* keep ABL's brightness */
+ 		}
+ 	}
++	/* sweetblnits=N: start brightness in nits (1..SWEET_FB_MAX_NITS), no CoreBrightness needed */
++	uint32_t blNits = 0;
++	if (PE_parse_boot_argn("sweetblnits", &blNits, sizeof(blNits)) && blNits >= 1 && blNits <= SWEET_FB_MAX_NITS) {
++		fBlLevel = blNits * 0x7ffu / SWEET_FB_MAX_NITS;
++		if (fBlLevel == 0) {
++			fBlLevel = 1;
++		}
++		IOLog("SWEET FB: sweetblnits %u -> level %#x\n", blNits, fBlLevel);
++	}
+ 	fBlSent = ~0u;
+ 	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
+ 	if (fDsi != NULL) {
+@@ -506,6 +522,7 @@ AppleCLCD::start(IOService *provider)
+ 			bl->setProperty("backlight-control", true);
+ 			bl->setProperty("brightness-nits", (unsigned long long)200, 32);
+ 			bl->setProperty("max-nits", (unsigned long long)SWEET_FB_MAX_NITS, 32);
++			bl->setProperty("min-nits", (unsigned long long)2, 32);
+ 			if (bl->attach(this)) {
+ 				bl->registerService();
+ 				IOLog("SWEET FB: AppleARMBacklight published\n");
+@@ -580,6 +597,11 @@ AppleCLCD::start(IOService *provider)
+ 	} else {
+ 		vhz = 60;
+ 	}
++	sweet_fb_guard = vhz >= 100 ? 25 : 75;
++	uint32_t guard;
++	if (PE_parse_boot_argn("sweetfb_guard", &guard, sizeof(guard)) && guard <= 90) {
++		sweet_fb_guard = guard;
++	}
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= vhz) ? 1 : vhz / hz;
+@@ -770,7 +792,7 @@ AppleCLCD::vsyncNext(void)
+ 	uint32_t left = (uint32_t)((uint64_t)(fVTotal - line) * fPanelUS / fVTotal);
+ 	uint32_t next = left + 300;
+ 	/* the panel frame after next at 60 Hz, the next one at 120 (sweetfb_vsync=120) */
+-	while (next < sweet_fb_vsync_us * 3 / 4) {
++	while (next < sweet_fb_vsync_us * sweet_fb_guard / 100) {
+ 		next += fPanelUS;
+ 	}
+ 	return next;
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+index 1d42272..753dd80 100644
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -3412,7 +3412,13 @@ rmtfs_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t
+ #define WLFW_HOST_CAP       0x34
+ static uint32_t g_msa_base = 0x51900000u;
+ #define WLFW_MSA_BASE       g_msa_base          /* DTB wlan_msa_region, inside "PIL Reserved" (vayu 0x8bc00000) */
+-#define WLFW_MSA_SIZE       0x00100000u
++/*
++ * MSA size: the WLAN firmware's memory. icnss sends the size of qcom,wlan-msa-fixed-region when
++ * the DT has one (icnss.c: msa_mem_size = region size; qcom,wlan-msa-memory is only the fallback).
++ * vayu (MIUI dtb.img): pil_wlan_fw_region 0x8bc00000 + 0x180000, so 1.5 MB, not 1 MB. wlmsa= overrides.
++ */
++static uint32_t g_msa_size = 0x00100000u;
++#define WLFW_MSA_SIZE       g_msa_size
+ #define WLFW_CLIENT_ID      0x4b4e454c          /* ath10k ATH10K_QMI_CLIENT_ID */
+ #define WLFW_SEG            6144                /* QMI_WLFW_MAX_DATA_SIZE_V01 */
+ #define VMID_WLAN           0x18
+@@ -3449,6 +3455,15 @@ static uint8_t w_ind_style;                 /* 0 ath10k, 1 icnss, 2 every indica
+ static uint8_t w_cal_kind = 1;              /* 1 meta_data_len 0, 2 empty request */
+ static uint32_t w_cal_delay, w_cal_at_ms, w_wait_until, w_wait_ms;
+ static bool w_escalate, w_escalated, w_icnss_msgs;
++/*
++ * wlfwicnss=1 (vayu 1026): the MIUI icnss flow exactly (icnss.c server_arrive): ind_register with
++ * fw_ready, msa_ready, pin_connect, client_id and rejuvenate (u32), msa_info, assign, msa_ready,
++ * cap, dynamic feature mask 0x1. No host_cap, BDF, cal_report or vbatt. Then wait for FW_READY.
++ */
++static uint32_t w_icnss;
++/* wlfwmax=N (default 3, 0 = never): after N WLAN PD restarts stop sending cal_report, so the
++ * PD stays up idle (1022f) instead of crashing every ~1.9 s for ever */
++static uint32_t w_max = 3;
+ 
+ struct wvar {
+ 	uint8_t host_cap, ind;
+@@ -3477,8 +3492,8 @@ w_var_apply(unsigned r)
+ 	w_cal_at_ms = w_wait_until = 0;
+ 	w_escalated = false;
+ 	if (!w_sweep) {
+-		w_ind_style = 0;
+-		w_icnss_msgs = false;
++		w_ind_style = w_icnss ? 1 : 0;
++		w_icnss_msgs = w_icnss != 0;
+ 		w_cal_kind = 1;
+ 		w_cal_delay = w_wait_ms = 0;
+ 		w_escalate = false;
+@@ -3810,6 +3825,10 @@ wlfw_arrive(uint32_t node, uint32_t port)
+ 	w_node = node;
+ 	w_port = port;
+ 	w_var_apply(w_arrivals - 1);
++	if (!w_sweep && w_max != 0 && w_arrivals > w_max && !(w_mode & 4)) {
++		w_mode |= 4;
++		LOG("wlfw: %u WLAN PD restarts: cal_report off from now on (wlfwmax %u), wlfwmode %u", w_arrivals - 1, w_max, w_mode);
++	}
+ 	struct wmsg m;
+ 	if (wm_new(&m, WLFW_IND_REGISTER)) {
+ 		wm_u8(&m, 0x10, 1);                     /* fw_ready_enable */
+@@ -3826,11 +3845,10 @@ wlfw_arrive(uint32_t node, uint32_t port)
+ 			wm_u8(&m, 0x18, 1);                 /* cold_boot_cal_done_enable */
+ 		}
+ 		if (w_ind_style >= 1) {
+-			wm_u8(&m, 0x19, 1);                 /* rejuvenate_enable (icnss) */
++			wm_u32(&m, 0x19, 1);                /* rejuvenate_enable: u32 in the icnss IDL */
+ 		}
+ 		if (w_ind_style == 2) {
+-			wm_u8(&m, 0x1A, 1);                 /* xo_cal_enable */
+-			wm_u8(&m, 0x1B, 1);                 /* cal_done_enable */
++			wm_u8(&m, 0x1A, 1);                 /* xo_cal_enable (the last TLV: there is no 0x1B) */
+ 		}
+ 		wm_send(&m);
+ 		w_step = "ind_register sent";
+@@ -3945,12 +3963,13 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 					wm_tlv(&m, 0x10, &mask, 8);
+ 					wm_send(&m);
+ 				}
+-				if (wm_new(&m, WLFW_VBATT)) {
++				/* MIUI sends vbatt only with an icnss ADC, which vayu's DT does not have */
++				if (w_sweep && wm_new(&m, WLFW_VBATT)) {
+ 					uint64_t uv = 3800000;
+ 					wm_tlv(&m, 0x01, &uv, 8);
+ 					wm_send(&m);
+ 				}
+-				LOG("wlfw: dynamic feature mask 0x1 and vbatt 3.8 V sent");
++				LOG("wlfw: dynamic feature mask 0x1 sent%s", w_sweep ? ", vbatt 3.8 V" : "");
+ 			}
+ 		} else {
+ 			char hx[3 * 24 + 1];
+@@ -4068,6 +4087,16 @@ wifi_enabled(void)
+ 		}
+ 		w_sweep = 0;
+ 		(void)PE_parse_boot_argn("wlfwsweep", &w_sweep, sizeof(w_sweep));
++		(void)PE_parse_boot_argn("wlfwicnss", &w_icnss, sizeof(w_icnss));
++		if (w_icnss && !w_sweep) {
++			w_mode |= 1 | 2 | 4;                /* no BDF, no host_cap, no cal_report */
++		}
++		(void)PE_parse_boot_argn("wlfwmax", &w_max, sizeof(w_max));
++		uint32_t msa = 0;
++		if (PE_parse_boot_argn("wlmsa", &msa, sizeof(msa)) && msa >= 0x10000 && msa <= 0x400000 && (msa & 0xffff) == 0) {
++			g_msa_size = msa;
++		}
++		LOG("wlfw: MSA %#x + %#x, wlfwicnss %u, wlfwmax %u", WLFW_MSA_BASE, WLFW_MSA_SIZE, w_icnss, w_max);
+ 		LOG("wlfw: wlfwmode %u (1 no BDF/cal, 2 no host_cap, 4 no cal_report, 8 no MSA assign), wlfwbdf \"%s\", wlfwsweep %u (%u variants)", w_mode, w_bdf_arg, w_sweep, (unsigned)W_NVARS);
+ 	}
+ 	return wifi_on > 0;
+@@ -7020,7 +7049,8 @@ soc_select_vayu(void)
+ 	g_apcs_ipc = 0xC;                       /* apcs: syscon@17c0000c */
+ 	g_carve_base = 0x8E000000u;
+ 	g_carve_size = 0x9600000u;
+-	g_msa_base = 0x8BC00000u;               /* pil_wlan_fw_region (0x180000), MSA 0x100000 */
++	g_msa_base = 0x8BC00000u;               /* pil_wlan_fw_region */
++	g_msa_size = 0x00180000u;               /* its size: what MIUI icnss sends (fixed region) */
+ 	g_smmu_pa = 0x15000000ull;
+ 	g_smmu_size = 0x00100000u;
+ 	g_wlan_sid = 0x640;                     /* icnss iommus = <&apps_smmu 0x0640 0x1> */
+-- 
+2.53.0
+

@@ -91,6 +91,20 @@ def d22ap_product(path=D22AP_ADT):
             return [(k, v) for k, f, v in c.props if not f and k not in ('name', 'AAPL,phandle')]
     raise SystemExit(f'{path}: no /product node')
 
+def d22ap_backlight(path=D22AP_ADT):
+    """/backlight of the real D22AP tree (CoreBrightness tuning: AAB caps, DBV range,
+    marketing table), without its function-* properties: they point at Apple pmgr
+    nodes this tree does not have."""
+    if not os.path.exists(path):
+        raise SystemExit(f'--backlight: {path} missing')
+    root, _ = adt.parse(open(path, 'rb').read())
+    for c in root.children:
+        if dict((k, v) for k, f, v in c.props).get('name') == b'backlight\0':
+            return [(k, v) for k, f, v in c.props
+                    if not f and k not in ('name', 'AAPL,phandle') and not k.startswith('function-')]
+    raise SystemExit(f'{path}: no /backlight node')
+
+
 u32 = lambda *v: struct.pack('<%dI' % len(v), *v)
 u64 = lambda *v: struct.pack('<%dQ' % len(v), *v)
 cstr = lambda s: s.encode() + b'\0'
@@ -103,7 +117,8 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, target='topaz', touch_fw=None, gpu_fw=None):
+def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, target='topaz', touch_fw=None, gpu_fw=None,
+          backlight=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     vayu = target == 'vayu'
     phys_base, mem_size = ((VAYU['PHYS_BASE'], VAYU['MEM_SIZE']) if vayu and not qemu else
@@ -293,6 +308,9 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, targ
     if product_props:
         product_props = [(k, cstr('sRGB') if k == 'artwork-display-gamut' else v) for k, v in product_props]
     product = [node('product', [ph()] + product_props)] if product_props else []
+    # --backlight (vayu 1026 test): CoreBrightness with sweetbl=1 never set a level;
+    # the real tree has a /backlight node with its tuning, ours had none.
+    product += [node('backlight', [ph()] + d22ap_backlight())] if backlight else []
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
@@ -352,7 +370,7 @@ if __name__ == '__main__':
             print(f'{p}: {len(gpu_fw[key])} bytes -> /vayu-gpu {key}', file=sys.stderr)
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
                  native='--native' in sys.argv, midmem='--midmem' in sys.argv, target=target,
-                 touch_fw=touch_fw, gpu_fw=gpu_fw)
+                 touch_fw=touch_fw, gpu_fw=gpu_fw, backlight='--backlight' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
